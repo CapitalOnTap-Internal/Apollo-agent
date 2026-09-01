@@ -1,0 +1,78 @@
+# GENERATED from apollo/agent.yml — do not edit by hand
+name: Apollo Agent
+
+on:
+  repository_dispatch:
+    types: [apollo_event]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Message or instructions for Apollo'
+        required: false
+        type: string
+      model:
+        description: 'Model to use'
+        required: false
+        default: 'sonnet'
+        type: choice
+        options:
+          - sonnet
+          - opus
+          - haiku
+          - fable
+
+concurrency:
+  group: apollo-${{ github.event.client_payload.thread_ts || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+
+jobs:
+  fast-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch to sandbox
+        run: |
+          OIDC_TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${MINTMCP_BASE_URL}" \
+            | jq -r '.value')
+
+          BODY=$(jq -n \
+            --arg slug "$AGENT_SLUG" \
+            --arg trigger "$TRIGGER_EVENT_ID" \
+            --arg event "$EVENT_NAME" \
+            --arg prompt "$PROMPT_OVERRIDE" \
+            --argjson payload "$EVENT_PAYLOAD" \
+            '{
+              agentSlug: $slug,
+              triggerEventId: $trigger,
+              eventName: $event,
+              promptOverride: $prompt,
+              eventPayload: (
+                if $event == "repository_dispatch" then
+                  $payload
+                else
+                  $payload + {source: "api"}
+                end
+              )
+            }')
+
+          curl -sf --retry 3 --retry-connrefused --retry-delay 2 -X POST \
+            "${MINTMCP_BASE_URL}/api/agent-dispatch" \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"
+        env:
+          MINTMCP_BASE_URL: https://app.mintmcp.com
+          AGENT_SLUG: apollo
+          TRIGGER_EVENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PAYLOAD: ${{ github.event_name == 'repository_dispatch'
+            && toJson(github.event.client_payload)
+            || github.event_name == 'workflow_dispatch'
+            && toJson(github.event.inputs)
+            || '{}' }}
+          PROMPT_OVERRIDE: ${{ github.event.inputs.prompt || '' }}
